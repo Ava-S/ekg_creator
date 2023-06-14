@@ -149,7 +149,7 @@ class DataStructure:
         self.split_combined_events = split_combined_events
 
     def is_event_data(self):
-        return "Event" in self.labels
+        return "Event" in self.labels or "EventEntry" in self.labels
 
     def contains_composed_events(self):
         contains_composed_events = "startTimestamp" in self.get_datetime_formats() \

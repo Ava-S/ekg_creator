@@ -1,13 +1,40 @@
 import json
 from abc import ABC
 from pathlib import Path
-from typing import List, Any, Optional, Union
+from string import Template
+from typing import List, Any, Optional, Union, Dict
 
 from dataclasses import dataclass
 
 from .interpreters import Interpreter
 from ..utilities.auxiliary_functions import replace_undefined_value, create_list, get_id_attribute_from_label
 import re
+
+relation_directions = {
+    "left-to-right": {"from_node": 0, "to_node": 1},
+    "right-to-left": {"from_node": 1, "to_node": 0}
+}
+
+
+def get_node_or_rel_pattern(name, obj_type, condition, properties):
+    if obj_type != "":
+        pattern = f"{name}:{obj_type}"
+    else:
+        pattern = name
+    if condition != "":
+        pattern = f"{pattern} WHERE {condition}"
+    elif properties != "":
+        pattern = f"{pattern} {{{properties}}}"
+    return pattern
+
+
+def convert(val):
+    constructors = [int, float, str]
+    for c in constructors:
+        try:
+            return c(val)
+        except ValueError:
+            pass
 
 
 @dataclass
@@ -71,41 +98,270 @@ class Condition:
 
 
 @dataclass()
-class Node(ABC):
+class Attribute(ABC):
+    optional: bool
     name: str
-    label: str
-    properties: List[Any]
-    where_condition: str
-    qi: Any
+    dtype: str
 
     @staticmethod
-    def from_string(node_description: str, interpreter: Interpreter) -> Optional["Node"]:
+    def from_string(attribute_str: str):
+        _optional = False
+        if "OPTIONAL" in attribute_str:
+            _optional = True
+            attribute_str = attribute_str.replace("OPTIONAL ", "")
+        _name = attribute_str.split(" ")[0]
+        _dtype = attribute_str.split(" ")[1]
+
+        return Attribute(_optional, _name, _dtype)
+
+    def get_pattern(self):
+        if self.optional:
+            pattern = "OPTIONAL $name $dtype"
+        else:
+            pattern = "$name $dtype"
+
+        pattern = Template(pattern).substitute(name=self.name,
+                                               dtype=self.dtype)
+
+        return pattern
+
+    def __repr__(self):
+        return self.get_pattern()
+
+
+@dataclass()
+class Attributes(ABC):
+    closed: bool
+    attributes: Dict[str, "Attribute"]
+
+    @staticmethod
+    def from_string(attributes_str: str):
+        attributes_str = attributes_str.replace("}", "")
+        attributes_str = attributes_str.replace(", ", ",")
+        _closed = True
+        if "OPEN" in attributes_str:
+            _closed = False
+            attributes_str = attributes_str.replace("OPEN ", "")
+
+        attributes_str = attributes_str.split(",")
+        _attributes = [Attribute.from_string(attribute_str) for attribute_str in attributes_str]
+        _attributes = {attribute.name: attribute for attribute in _attributes}
+
+        return Attributes(_closed, _attributes)
+
+    def get_pattern(self):
+        if self.attributes is None:
+            return ""
+        attribute_patterns = [attribute.get_pattern() for attribute in self.attributes.values()]
+        attribute_patterns = ", ".join(attribute_patterns)
+        if self.closed:
+            pattern = "$attribute_patterns"
+        else:
+            pattern = "OPEN $attribute_patterns"
+
+        pattern = Template(pattern).substitute(attribute_patterns=attribute_patterns)
+        return pattern
+
+    def __repr__(self):
+        return self.get_pattern()
+
+
+@dataclass()
+class Node(ABC):
+    name: str
+    str_types: List[str]
+    types: List["Node"]
+    # TODO make optional
+    labels: List[str]
+    attributes: "Attributes"
+    closed: bool
+
+    @staticmethod
+    def from_string(node_description: str) -> Optional["Node"]:
         # we expect a node to be described in (node_name:Node_label)
         node_description = re.sub(r"[()]", "", node_description)
         node_components = node_description.split(":", 1)
-        name = node_components[0]
-        label = ""
-        where_condition = ""
-        properties = []
-        if len(node_components) > 1:
-            node_labels_prop_where = node_components[1]
-            node_labels_prop_where = node_labels_prop_where.replace("'", "\"")
-            if "WHERE" in node_labels_prop_where:
-                label = node_labels_prop_where.split(" WHERE ")[0]
-                where_condition = node_labels_prop_where.split(" WHERE ")[1]
-            elif "{" in node_labels_prop_where:
-                label = node_labels_prop_where.split(" {")[0]
-                properties = node_labels_prop_where.split(" {")[1]
-                properties = properties.replace("}", "")
-                properties = properties.split(",")
-            else:
-                label = node_labels_prop_where
+        _name = node_components[0]
+        label_str = ""
+        _attributes = None
 
-        return Node(name=name, label=label, properties=properties,
-                    where_condition=where_condition, qi=interpreter.nodes_qi)
+        if len(node_components) > 1:
+            node_labels_attr = node_components[1]
+            node_labels_attr = node_labels_attr.replace("'", "\"")
+            if "{" in node_labels_attr:
+                label_str = node_labels_attr.split(" {")[0]
+                attributes_str = node_labels_attr.split(" {")[1]
+                _attributes = Attributes.from_string(attributes_str)
+            else:
+                label_str = node_labels_attr
+
+        _closed = True
+        if "OPEN" in label_str:
+            _closed = False
+            label_str = label_str.replace(" OPEN", "")
+
+        _labels = label_str.split(":")
+        _types = [label for label in _labels if "Node" in label]
+        _labels = [label for label in _labels if label not in set(_types)]
+
+        return Node(name=_name, str_types=_types, types=[], labels=_labels,
+                    attributes=_attributes, closed=_closed)
+
+    def get_pattern(self, include_attributes=True):
+        types_and_labels = self.str_types + self.labels
+        if len(types_and_labels) > 0:
+            node_label_str = ":".join(types_and_labels)
+            node_pattern_str = "$node_name:$node_labels"
+            node_pattern = Template(node_pattern_str).substitute(node_name=self.name,
+                                                                 node_labels=node_label_str)
+        else:
+            node_pattern_str = "$node_name"
+            node_pattern = Template(node_pattern_str).substitute(node_name=self.name)
+
+        if not self.closed:
+            node_pattern_str = "$node_pattern OPEN"
+            node_pattern = Template(node_pattern_str).substitute(node_pattern=node_pattern)
+
+        if self.attributes is not None and include_attributes:
+            attributes_pattern = self.attributes.get_pattern()
+            node_pattern_str = "$node_pattern {$attributes_pattern}"
+            node_pattern = Template(node_pattern_str).substitute(node_pattern=node_pattern,
+                                                                 attributes_pattern=attributes_pattern)
+
+        node_pattern_str = "($node_pattern)"
+        node_pattern = Template(node_pattern_str).substitute(node_pattern=node_pattern)
+
+        return node_pattern
+
+    def get_labels(self):
+        labels = self.labels
+        for node in self.types:
+            labels.extend(node.get_labels())
+        return list(set(labels))
+
+    def get_attributes(self, include_optional=False):
+        attributes = []
+        if self.attributes is not None:
+            if include_optional:
+                attributes.extend(list(self.attributes.attributes.keys()))
+            else:
+                attributes.extend(
+                    [key for key, attribute in self.attributes.attributes.items() if not attribute.optional])
+
+        for node in self.types:
+            attributes.extend(node.get_attributes())
+        return list(set(attributes))
+
+    def get_query(self, name):
+        labels = self.get_labels()
+        label_str = ":".join(labels)
+        attributes = self.get_attributes()
+        attributes = [f"{name}.{attribute} IS NOT NULL" for attribute in attributes]
+        attribute_str = " AND ".join(attributes)
+
+        if attribute_str != "":
+            return f"MATCH ({name}:{label_str} WHERE {attribute_str})"
+        else:
+            return f"MATCH ({name}:{label_str})"
+
+    def __repr__(self):
+        return self.get_pattern()
+
+
+@dataclass()
+class NodeWithProperties:
+    name: str
+    obj_type: str
+    object: Optional[Node]
+    condition: str
+    properties: str
+    keywords: str
+
+    @staticmethod
+    def from_string(node_description: str, is_consequent=False):
+        # we expect a node to be described in KEYWORDS (node_name:node_type {properties}) OR
+        # (node_name: node_type WHERE properties)
+        keywords = ""
+        if "(" != node_description[0]:
+            keywords = node_description.split(" (")[0]
+            node_description = node_description.split(" (")[1]
+
+        node_description = re.sub(r"[()]", "", node_description)
+        index_first_colon = node_description.find(":")
+        index_first_bracket = node_description.find("{")
+        if index_first_bracket > index_first_colon or index_first_bracket == -1:
+            node_components = node_description.split(":", 1)
+        else:
+            node_components = [node_description]
+
+        _node_type = ""
+        _properties_str = ""
+        _condition_str = ""
+
+        if len(node_components) > 1:
+            _name = node_components[0]
+            _node_type, _properties_str, _condition_str = NodeWithProperties.split_remaining_part(
+                node_components[1])
+        else:
+            _name, _properties_str, _condition_str = NodeWithProperties.split_remaining_part(node_components[0])
+            if "Node" in _name:
+                _node_type = _name
+                _name = ""
+
+        if _name == "":
+            _name = re.sub(r'(?<!^)(?=[A-Z])', '_', _node_type).lower()
+
+        return NodeWithProperties(name=_name, obj_type=_node_type, object=None, condition=_condition_str,
+                                  properties=_properties_str, keywords=keywords)
+
+    @staticmethod
+    def split_remaining_part(type_properties_condition: str):
+        type_properties_condition = type_properties_condition.replace("'", "\"")
+        _properties_str = ""
+        _condition_str = ""
+        if "{" in type_properties_condition:
+            _name = type_properties_condition.split(" {")[0]
+            _properties_str = type_properties_condition.split(" {")[1]
+            _properties_str = _properties_str.replace("}", "")
+        elif "WHERE" in type_properties_condition:
+            _name = type_properties_condition.split(" WHERE")[0]
+            _condition_str = type_properties_condition.split(" WHERE")[1]
+        else:
+            _name = type_properties_condition
+
+        return _name, _properties_str, _condition_str
 
     def get_pattern(self):
-        return self.qi.get_node_pattern(self.label, self.name, self.properties, self.where_condition)
+        pattern = get_node_or_rel_pattern(name=self.name, obj_type=self.obj_type, condition=self.condition,
+                                          properties=self.properties)
+        pattern = f"({pattern})"
+
+        return pattern
+
+    def get_query(self, is_consequent):
+        query_str = ""
+        if not is_consequent:
+            query_str += self.object.get_query(self.name)
+            query_str += "\n"
+            if self.condition != "":
+                query_str += f"MATCH ({self.name} WHERE {self.condition})"
+            if self.properties != "":
+                query_str += f"MATCH ({self.name} {{{self.properties}}})"
+        else:
+            if self.obj_type != "":
+                labels = self.object.get_labels()
+                labels = ":".join(labels)
+
+                if self.properties != "":
+                    query_str += f"{self.keywords} ({self.name}:{labels} {{{self.properties}}})"
+                else:
+                    query_str += f"{self.keywords} ({self.name}:{labels})"
+            else:
+                if self.properties != "":
+                    query_str += f"{self.keywords} ({self.name} {{{self.properties}}})"
+                else:
+                    query_str += f"{self.keywords} ({self.name})"
+        return query_str
 
     def __repr__(self):
         return self.get_pattern()
@@ -113,53 +369,385 @@ class Node(ABC):
 
 @dataclass()
 class Relationship(ABC):
-    relation_name: str
-    relation_type: str
-    from_node: Node
-    to_node: Node
-    properties: List[Any]
-    has_direction: bool
-    qi: Any
+    name: str
+    label: Optional[str]
+    str_types: List[str]
+    types: List["Relationship"]
+    from_node: Optional[Node]
+    from_node_name: str
+    to_node: Optional[Node]
+    to_node_name: str
+    attributes: "Attributes"
 
     @staticmethod
-    def from_string(relation_description: str,
-                    interpreter: Interpreter) -> Optional["Relationship"]:
+    def from_string(relation_description: str) -> Optional["Relationship"]:
         # we expect a node to be described in (node_name:Node_label)
-        relation_directions = {
-            "left-to-right": {"has_direction": True, "from_node": 0, "to_node": 1},
-            "right-to-left": {"has_direction": True, "from_node": 1, "to_node": 0},
-            "undefined": {"has_direction": False, "from_node": 0, "to_node": 1}
-        }
-
-        nodes = re.findall(r'\([^>]*\)', relation_description)
-        _relation_string = re.findall(r'\[[^>]*]', relation_description)[0]
+        nodes = re.findall(r'\([^<>]*\)', relation_description)
+        _relation_string = re.findall(r'\[[^<>]*]', relation_description)[0]
         _relation_string = re.sub(r"[\[\]]", "", _relation_string)
         _relation_components = _relation_string.split(":")
-        _relation_name = _relation_components[0]
-        _relation_type = _relation_components[1]
+        _name = _relation_components[0]
+        label_str = ""
+        _attributes = None
+
+        if len(_relation_components) > 1:
+            relation_label_attr = _relation_components[1]
+            relation_label_attr = relation_label_attr.replace("'", "\"")
+            if "{" in relation_label_attr:
+                label_str = relation_label_attr.split(" {")[0]
+                attributes_str = relation_label_attr.split(" {")[1]
+                _attributes = Attributes.from_string(attributes_str)
+            else:
+                label_str = relation_label_attr
 
         if ">" in relation_description:
             direction = "left-to-right"
         elif "<" in relation_description:
             direction = "right-to-left"
         else:
-            direction = "undefined"
+            raise ValueError(f"In {relation_directions} no direction has been defined")
 
-        _has_direction = relation_directions[direction]["has_direction"]
-        _from_node = Node.from_string(nodes[relation_directions[direction]["from_node"]], interpreter)
-        _to_node = Node.from_string(nodes[relation_directions[direction]["to_node"]], interpreter)
+        _from_node_name = nodes[relation_directions[direction]["from_node"]]
+        _to_node_name = nodes[relation_directions[direction]["to_node"]]
+        _from_node_name = re.sub(r"[()]", "", _from_node_name)
+        _to_node_name = re.sub(r"[()]", "", _to_node_name)
 
-        return Relationship(relation_name=_relation_name, relation_type=_relation_type,
-                            from_node=_from_node, to_node=_to_node, properties=[], has_direction=_has_direction,
-                            qi=interpreter.relationship_qi)
 
-    def get_pattern(self):
-        return self.qi.get_relationship_pattern(from_node=self.from_node, to_node=self.to_node,
-                                                relation_name=self.relation_name, relation_type=self.relation_type,
-                                                has_direction=self.has_direction)
+        _labels = label_str.split(":")
+        _types = [label for label in _labels if "Relation" in label]
+        _labels = [label for label in _labels if label not in set(_types)]
+        if len(_labels) > 1:
+            raise ValueError(f"Too many labels for {relation_description} defined")
+        if len(_labels) == 1:
+            _label_str = _labels[0]
+        else:
+            _label_str = None
+
+        return Relationship(name=_name, label=_label_str,
+                            str_types=_types, types=[],
+                            from_node_name=_from_node_name, to_node_name=_to_node_name,
+                            from_node=None, to_node=None,
+                            attributes=_attributes)
+
+    def get_pattern(self, include_attributes=True):
+        types_and_label = []
+        types_and_label.extend(self.str_types)
+        if self.label is not None:
+            types_and_label.append(self.label)
+
+        if len(types_and_label) > 0:
+            rel_label_str = ":".join(types_and_label)
+            rel_pattern_str = "$rel_name:$rel_labels"
+            rel_pattern = Template(rel_pattern_str).substitute(rel_name=self.name,
+                                                               rel_labels=rel_label_str
+                                                               )
+        else:
+            rel_pattern_str = "$rel_name"
+            rel_pattern = Template(rel_pattern_str).substitute(rel_name=self.name)
+
+        if self.attributes is not None and include_attributes:
+            attributes_pattern = self.attributes.get_pattern()
+            rel_pattern_str = "$rel_pattern {$attributes_pattern}"
+            rel_pattern = Template(rel_pattern_str).substitute(rel_pattern=rel_pattern,
+                                                               attributes_pattern=attributes_pattern)
+
+        from_node_pattern = self.from_node.get_pattern(include_attributes=False)
+        to_node_pattern = self.to_node.get_pattern(include_attributes=False)
+
+        rel_pattern_str = "$from_node - [$rel_pattern] -> $to_node"
+        rel_pattern = Template(rel_pattern_str).substitute(from_node=from_node_pattern,
+                                                           rel_pattern=rel_pattern,
+                                                           to_node=to_node_pattern)
+
+        return rel_pattern
+
+    def get_label(self):
+        labels = [self.label]
+        for relationship in self.types:
+            labels.extend(relationship.get_label())
+        labels = list(set(labels))
+        if len(labels) > 1:
+            raise ValueError(f"Too many labels defined for relation {self.name}")
+        if len(labels) == 1:
+            return labels[0]
+        return ""
+
+    def get_attributes(self, include_optional=False):
+        attributes = []
+        if self.attributes is not None:
+            if include_optional:
+                attributes.extend(list(self.attributes.attributes.keys()))
+            else:
+                attributes.extend(
+                    [key for key, attribute in self.attributes.attributes.items() if not attribute.optional])
+
+        for node in self.types:
+            attributes.extend(node.get_attributes())
+        return list(set(attributes))
+
+    def get_query(self, rel_name, from_node_name, to_node_name):
+        query_str = ""
+
+        label = self.get_label()
+        attributes = self.get_attributes()
+        attributes = [f"{rel_name}.{attribute} IS NOT NULL" for attribute in attributes]
+        attribute_str = " AND ".join(attributes)
+
+        from_node_label_str = ":".join(self.from_node.get_labels())
+        if from_node_label_str != "":
+            from_node = f"{from_node_name}:{from_node_label_str}"
+        else:
+            from_node = from_node_name
+
+        to_node_label_str = ":".join(self.to_node.get_labels())
+        if to_node_label_str != "":
+            to_node = f"{to_node_name}:{to_node_label_str}"
+        else:
+            to_node = to_node_name
+
+        if attribute_str != "":
+            query_str += f"MATCH ({from_node}) - [{rel_name}:{label} WHERE {attribute_str}] -> ({to_node})"
+        else:
+            query_str += f"MATCH ({from_node}) - [{rel_name}:{label}] -> ({to_node})"
+
+        query_str += "\n"
+
+        return query_str
 
     def __repr__(self):
         return self.get_pattern()
+
+
+@dataclass()
+class RelationshipWithProperties:
+    name: str
+    obj_type: str
+    object: Optional[Relationship]
+    from_node: NodeWithProperties
+    to_node: NodeWithProperties
+    condition: str
+    properties: str
+    keywords: str
+
+    @staticmethod
+    def from_string(rel_description: str, is_consequent=False):
+        # we expect a node to be described in KEYWORDS (node_name:node_type {properties}) OR
+        # (node_name: node_type WHERE properties)
+        keywords = ""
+        if "(" != rel_description[0]:
+            keywords = rel_description.split(" (")[0]
+            rel_description = rel_description.replace(f"{keywords} ", "")
+
+        nodes = re.findall(r'\([^<>]*\)', rel_description)
+        _relation_string = re.findall(r'\[[^<>]*]', rel_description)[0]
+        _relation_string = re.sub(r"[\[\]]", "", _relation_string)
+        index_first_colon = _relation_string.find(":")
+        index_first_bracket = _relation_string.find("{")
+        if index_first_bracket > index_first_colon or index_first_bracket == -1:
+            rel_components = _relation_string.split(":", 1)
+        else:
+            rel_components = [_relation_string]
+
+        if ">" in rel_description:
+            direction = "left-to-right"
+        elif "<" in rel_description:
+            direction = "right-to-left"
+        else:
+            raise ValueError(f"In {relation_directions} no direction has been defined")
+
+        _obj_type = ""
+        _properties_str = ""
+        _condition_str = ""
+        _from_node_description = nodes[relation_directions[direction]["from_node"]]
+        _from_node_with_properties = NodeWithProperties.from_string(_from_node_description, is_consequent)
+        _to_node_description = nodes[relation_directions[direction]["to_node"]]
+        _to_node_with_properties = NodeWithProperties.from_string(_to_node_description, is_consequent)
+
+        if not is_consequent:
+            try:
+                _name = rel_components[0]
+                _obj_type, _properties_str, _condition_str = NodeWithProperties.split_remaining_part(
+                    rel_components[1])
+            except ValueError:
+                raise ValueError("No type of node has been defined")
+        else:
+            if len(rel_components) > 1:
+                _name = rel_components[0]
+                _obj_type, _properties_str, _condition_str = RelationshipWithProperties.split_remaining_part(
+                    rel_components[1])
+            else:
+                _name, _properties_str, _condition_str = NodeWithProperties.split_remaining_part(rel_components[0])
+
+        return RelationshipWithProperties(name=_name,
+                                          obj_type=_obj_type, from_node=_from_node_with_properties,
+                                          to_node=_to_node_with_properties,
+                                          object=None, condition=_condition_str,
+                                          properties=_properties_str, keywords=keywords)
+
+    @staticmethod
+    def split_remaining_part(type_properties_condition: str):
+        type_properties_condition = type_properties_condition.replace("'", "\"")
+        _properties_str = ""
+        _condition_str = ""
+        if "{" in type_properties_condition:
+            _name = type_properties_condition.split(" {")[0]
+            _properties_str = type_properties_condition.split(" {")[1]
+            _properties_str = _properties_str.replace("}", "")
+        elif "WHERE" in type_properties_condition:
+            _name = type_properties_condition.split(" WHERE")[0]
+            _condition_str = type_properties_condition.split(" WHERE")[1]
+        else:
+            _name = type_properties_condition
+
+        return _name, _properties_str, _condition_str
+
+    def get_pattern(self):
+
+        from_node_pattern = self.from_node.get_pattern()
+        to_node_pattern = self.to_node.get_pattern()
+
+        pattern = get_node_or_rel_pattern(name=self.name, obj_type=self.obj_type, condition=self.condition,
+                                          properties=self.properties)
+
+        pattern = f"{from_node_pattern} - [{pattern}] -> {to_node_pattern}"
+
+        return pattern
+
+    def get_query(self, is_consequent):
+        query_str = ""
+        if not is_consequent:
+            query_str += self.object.get_query(self.name, self.from_node.name, self.to_node.name)
+            query_str += "\n"
+            query_str += self.from_node.get_query(is_consequent)
+            query_str += "\n"
+            query_str += self.to_node.get_query(is_consequent)
+            query_str += "\n"
+            if self.condition != "":
+                query_str += f"MATCH () - [{self.name} WHERE {self.condition}] -> ()"
+            if self.properties != "":
+                query_str += f"MATCH () - [{self.name} {{{self.properties}}}] -> ()"
+        else:
+            if self.obj_type != "":
+                label = self.object.get_label()
+                rel_pattern = f"{self.name}:{label}"
+            else:
+                rel_pattern = self.name
+
+            if self.properties != "":
+                rel_pattern = f"{rel_pattern} {{{self.properties}}}"
+
+            query_str += f"{self.keywords} ({self.from_node.name}) - [{rel_pattern}] -> ({self.to_node.name})"
+        return query_str
+
+    def __repr__(self):
+        return self.get_pattern()
+
+
+@dataclass()
+class Proposition:
+    proposition: Union["NodeWithProperties", "RelationshipWithProperties"]
+    is_consequent: bool
+
+    @staticmethod
+    def from_string(proposition_str, is_consequent=False):
+        if "-" in proposition_str:
+            _proposition = RelationshipWithProperties.from_string(proposition_str, is_consequent)
+        else:
+            _proposition = NodeWithProperties.from_string(proposition_str, is_consequent)
+        return Proposition(proposition=_proposition, is_consequent=is_consequent)
+
+    @staticmethod
+    def from_dict(obj: Any, is_consequent):
+        return Proposition.from_string(obj, is_consequent)
+
+    def get_pattern(self):
+        return self.proposition.get_pattern()
+
+    def get_query(self):
+        return self.proposition.get_query(self.is_consequent)
+
+    def __repr__(self):
+        return self.get_pattern()
+
+
+@dataclass()
+class Constructor(ABC):
+    antecedents: List[Proposition]
+    consequents: List[Proposition]
+
+    @staticmethod
+    def from_dict(obj: Any):
+        if obj is None:
+            return None
+        _antecedents = create_list(Proposition, obj.get("antecedents"), False)
+        _consequents = create_list(Proposition, obj.get("consequents"), True)
+        return Constructor(antecedents=_antecedents, consequents=_consequents)
+
+    def get_query(self):
+        query_str = ""
+        for antecedent in self.antecedents:
+            query_str += antecedent.get_query()
+            query_str += "\n"
+        for consequent in self.consequents:
+            query_str += consequent.get_query()
+            query_str += "\n"
+        return query_str
+
+
+@dataclass()
+class NodesWithConstructors(ABC):
+    nodes: Dict[str, "Node"]
+    constructors: Dict[str, "Constructor"]
+
+    @staticmethod
+    def from_list(list_with_obj: List[Any]):
+        _nodes = {}
+        _constructors = {}
+        for obj in list_with_obj:
+            node: Node
+            node = Node.from_string(obj.get("node_description"))
+            constructor = Constructor.from_dict(obj.get("constructor"))
+            _nodes[node.name] = node
+            if constructor is not None:
+                _constructors[node.name] = constructor
+
+        nodes_with_constructors = NodesWithConstructors(nodes=_nodes, constructors=_constructors)
+        nodes_with_constructors.link_nodes()
+
+        return nodes_with_constructors
+
+    def link_nodes(self):
+        for name, node in self.nodes.items():
+            for type_str in node.str_types:
+                node.types.append(self.nodes[type_str])
+
+
+@dataclass()
+class RelationshipsWithConstructors(ABC):
+    relationships: Dict[str, "Relationship"]
+    constructors: Dict[str, "Constructor"]
+
+    @staticmethod
+    def from_list(list_with_obj: List[Any]):
+        _relationships = {}
+        _constructors = {}
+        for obj in list_with_obj:
+            relationship = Relationship.from_string(obj.get("relationship_description"))
+            constructor = Constructor.from_dict(obj.get("constructor"))
+            _relationships[relationship.name] = relationship
+            if constructor is not None:
+                _constructors[relationship.name] = constructor
+
+        relationship_with_constructors = RelationshipsWithConstructors(relationships=_relationships,
+                                                                       constructors=_constructors)
+        relationship_with_constructors.link_relationships()
+
+        return relationship_with_constructors
+
+    def link_relationships(self):
+        for name, relationship in self.relationships.items():
+            for type_str in relationship.str_types:
+                relationship.types.append(self.relationships[type_str])
 
 
 @dataclass
@@ -500,20 +1088,29 @@ class Log:
 
 class SemanticHeader(ABC):
     def __init__(self, name: str, version: str,
-                 entities: List[Entity], relations: List[Relation],
+                 nodes: Dict[str, Node], relations: Dict[str, Relationship],
+                 constructors: Dict[str, Constructor],
                  classes: List[Class], log: Log):
         self.name = name
         self.version = version
-        self.entities = entities
+        self.nodes = nodes
         self.relations = relations
+        self.constructors = constructors
         self.classes = classes
         self.log = log
 
-    def get_entity(self, entity_type) -> Optional[Entity]:
-        for entity in self.entities:
-            if entity_type == entity.type:
-                return entity
+    def get_entity(self, entity_name) -> Optional[Node]:
+        for node in self.nodes:
+            if "Entity" in node.labels:
+                if entity_name == node.name:
+                    return node
         return None
+
+    def get_node(self, node_name) -> Optional[Node]:
+        if node_name in self.nodes:
+            return self.nodes[node_name]
+        else:
+            raise ValueError(f"{node_name} is not defined")
 
     @staticmethod
     def from_dict(obj: Any, interpreter: Interpreter) -> Optional["SemanticHeader"]:
@@ -521,12 +1118,50 @@ class SemanticHeader(ABC):
             return None
         _name = obj.get("name")
         _version = obj.get("version")
-        _entities = create_list(Entity, obj.get("entities"), interpreter)
-        _relations = create_list(Relation, obj.get("relations"), interpreter)
+        _nodes_with_constructors = NodesWithConstructors.from_list(obj.get("nodes"))
+        _nodes = _nodes_with_constructors.nodes
+        _constructors = _nodes_with_constructors.constructors
+        _relationships_with_constructors = RelationshipsWithConstructors.from_list(obj.get("relationships"))
+        _relations = _relationships_with_constructors.relationships
+        _rel_constructors = _relationships_with_constructors.constructors
+        _constructors.update(_rel_constructors)
         _classes = create_list(Class, obj.get("classes"), interpreter)
         _log = Log.from_dict(obj.get("log"), interpreter)
-        return SemanticHeader(_name, _version, _entities, _relations,
-                              _classes, _log)
+        sh = SemanticHeader(_name, _version, _nodes, _relations, _constructors,
+                            _classes, _log)
+        sh.link_nodes_to_relationships()
+        sh.link_constructors()
+        return sh
+
+    def link_nodes_to_relationships(self):
+        for name, relationship in self.relations.items():
+            from_node_name = relationship.from_node_name
+            to_node_name = relationship.to_node_name
+            relationship.from_node = self.nodes[from_node_name]
+            relationship.to_node = self.nodes[to_node_name]
+
+    def link_constructors(self):
+        for name, constructor in self.constructors.items():
+            antecedents = constructor.antecedents
+            consequents = constructor.consequents
+            for antecedent in antecedents:
+                self.link_proposition(antecedent)
+            for consequent in consequents:
+                self.link_proposition(consequent)
+
+    def link_proposition(self, proposition):
+
+        obj_type = proposition.proposition.obj_type
+        if "Node" in obj_type:
+            proposition.proposition.object = self.nodes[obj_type]
+        else:
+            proposition.proposition.object = self.relations[obj_type]
+            from_node_name = proposition.proposition.from_node.obj_type
+            to_node_name = proposition.proposition.to_node.obj_type
+            if "Node" in from_node_name:
+                proposition.proposition.from_node.object = self.nodes[from_node_name]
+            if "Node" in to_node_name:
+                proposition.proposition.to_node.object = self.nodes[to_node_name]
 
     @staticmethod
     def create_semantic_header(path: Path, query_interpreter):

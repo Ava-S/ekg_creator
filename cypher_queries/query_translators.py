@@ -196,30 +196,3 @@ class RelationshipCypher:
                                                                              to_node=to_node_pattern,
                                                                              relation_name=relation_name)
         return relationship_pattern
-
-
-class NodesCypher:
-    @staticmethod
-    def get_node_pattern(label, name, properties, where_condition):
-        if label != "":
-            node_pattern_str = "$node_name: $node_label"
-            node_pattern = Template(node_pattern_str).substitute(node_name=name,
-                                                                 node_label=label)
-        else:
-            node_pattern_str = "$node_name"
-            node_pattern = Template(node_pattern_str).substitute(node_name=name)
-
-        if len(properties) > 0:
-            properties_string = ",".join(properties)
-            node_pattern_str = "($node_pattern {$properties})"
-            node_pattern = Template(node_pattern_str).substitute(node_pattern=node_pattern,
-                                                                 properties=properties_string)
-        elif where_condition != "":
-            node_pattern_str = "($node_pattern WHERE $where_condition)"
-            node_pattern = Template(node_pattern_str).substitute(node_pattern=node_pattern,
-                                                                 where_condition=where_condition)
-        else:
-            node_pattern_str = "($node_pattern)"
-            node_pattern = Template(node_pattern_str).substitute(node_pattern=node_pattern)
-
-        return node_pattern

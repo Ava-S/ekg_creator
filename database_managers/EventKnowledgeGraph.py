@@ -194,6 +194,12 @@ class EventKnowledgeGraph:
 
         self.ekg_builder.create_entities(entity_types)
 
+    def create_nodes(self,  node_names: Optional[List[str]] = None):
+        self.ekg_builder.create_nodes(node_names)
+
+    def create_relationships(self, relationship_names: Optional[List[str]] = None):
+        self.ekg_builder.create_relationships(relationship_names)
+
     def correlate_events_to_entities(self, entity_types: Optional[List[str]] = None) -> None:
         """
         Pass on method to ekg_builder to create relations between entities based on nodes as specified in the

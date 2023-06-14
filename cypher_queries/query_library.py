@@ -8,7 +8,6 @@ from ..database_managers.db_connection import Query
 from string import Template
 
 
-
 class CypherQueryLibrary:
 
     @staticmethod
@@ -292,6 +291,16 @@ class CypherQueryLibrary:
                          "entity_attributes": entity.get_entity_attributes_as_node_properties(),
                          "entity_type": entity.type
                      })
+
+    @staticmethod
+    def get_create_constructor_query(constructor: "Constructor") -> Query:
+        # find events that contain the entity as property and not nan
+        # save the value of the entity property as id and also whether it is a virtual entity
+        # create a new entity node if it not exists yet with properties
+        # language=SQL
+        query_str = constructor.get_query()
+
+        return Query(query_str=query_str)
 
     @staticmethod
     def get_correlate_events_to_entity_query(entity: Entity, batch_size: int) -> Query:
@@ -764,7 +773,7 @@ class CypherQueryLibrary:
         # language=sql
         query_str = '''
             MATCH (n:$labels)
-            WITH $primary_keys, collect(n) as nodes
+            WITH $primary_keys collect(n) as nodes
             CALL apoc.refactor.mergeNodes(nodes, {
                 properties:'combine'})
             YIELD node
@@ -774,7 +783,8 @@ class CypherQueryLibrary:
         return Query(query_str=query_str,
                      template_string_parameters={
                          "labels": data_structure.get_label_string(),
-                         "primary_keys": data_structure.get_primary_keys_as_attributes()
+                         "primary_keys": f"{data_structure.get_primary_keys_as_attributes()}, "
+                                         f"" if data_structure.get_primary_keys_as_attributes() != "" else ""
                      })
 
     @staticmethod
@@ -857,7 +867,7 @@ class CypherQueryLibrary:
         return Query(query_str=query_str,
                      template_string_parameters={
                          "entity": entity.type,
-                         "relative_position":relative_position.type
+                         "relative_position": relative_position.type
                      })
 
     @staticmethod
@@ -866,7 +876,8 @@ class CypherQueryLibrary:
         query_str = '''
                     MATCH (f1 :Event) - [:CORR] -> (equipment :Equipment)
                     MATCH (f1) - [:OBSERVED] -> (a1:Activity) -[:AT]-> (l:Location)
-                    // ensure f2 should have operated on the required by checking that the activity operates on that  entity
+                    // ensure f2 should have operated on the required by checking that the activity operates on that  
+                    entity
                     MATCH (a1) - -> (:EntityType {name: '$entity'}) 
                     WITH f1, equipment, l
                     CALL {WITH f1, equipment, l
