@@ -108,7 +108,8 @@ class Attribute(ABC):
         _optional = False
         if "OPTIONAL" in attribute_str:
             _optional = True
-            attribute_str = attribute_str.replace("OPTIONAL ", "")
+            attribute_str = attribute_str.replace("OPTIONAL", "")
+            attribute_str = attribute_str.strip()
         _name = attribute_str.split(" ")[0]
         _dtype = attribute_str.split(" ")[1]
 
@@ -141,7 +142,8 @@ class Attributes(ABC):
         _closed = True
         if "OPEN" in attributes_str:
             _closed = False
-            attributes_str = attributes_str.replace("OPEN ", "")
+            attributes_str = attributes_str.replace("OPEN", "")
+            attributes_str = attributes_str.strip()
 
         attributes_str = attributes_str.split(",")
         _attributes = [Attribute.from_string(attribute_str) for attribute_str in attributes_str]
@@ -198,7 +200,8 @@ class Node(ABC):
         _closed = True
         if "OPEN" in label_str:
             _closed = False
-            label_str = label_str.replace(" OPEN", "")
+            label_str = label_str.replace("OPEN", "")
+            label_str = label_str.strip()
 
         _labels = label_str.split(":")
         _types = [label for label in _labels if "Node" in label]
@@ -252,14 +255,14 @@ class Node(ABC):
             attributes.extend(node.get_attributes())
         return list(set(attributes))
 
-    def get_query(self, name):
+    def get_query(self, name, use_attributes=True):
         labels = self.get_labels()
         label_str = ":".join(labels)
         attributes = self.get_attributes()
         attributes = [f"{name}.{attribute} IS NOT NULL" for attribute in attributes]
         attribute_str = " AND ".join(attributes)
 
-        if attribute_str != "":
+        if attribute_str != "" and use_attributes:
             return f"MATCH ({name}:{label_str} WHERE {attribute_str})"
         else:
             return f"MATCH ({name}:{label_str})"
@@ -338,14 +341,15 @@ class NodeWithProperties:
 
         return pattern
 
-    def get_query(self, is_consequent):
+    def get_query(self, is_consequent, use_attributes=True):
         query_str = ""
         if not is_consequent:
-            query_str += self.object.get_query(self.name)
-            query_str += "\n"
+            query_str += self.object.get_query(self.name, use_attributes=use_attributes)
             if self.condition != "":
+                query_str += "\n" if query_str != "" else ""
                 query_str += f"MATCH ({self.name} WHERE {self.condition})"
             if self.properties != "":
+                query_str += "\n" if query_str != "" else ""
                 query_str += f"MATCH ({self.name} {{{self.properties}}})"
         else:
             if self.obj_type != "":
@@ -412,7 +416,6 @@ class Relationship(ABC):
         _from_node_name = re.sub(r"[()]", "", _from_node_name)
         _to_node_name = re.sub(r"[()]", "", _to_node_name)
 
-
         _labels = label_str.split(":")
         _types = [label for label in _labels if "Relation" in label]
         _labels = [label for label in _labels if label not in set(_types)]
@@ -462,9 +465,9 @@ class Relationship(ABC):
         return rel_pattern
 
     def get_label(self):
-        labels = [self.label]
+        labels = [self.label] if self.label is not None else []
         for relationship in self.types:
-            labels.extend(relationship.get_label())
+            labels.append(relationship.get_label())
         labels = list(set(labels))
         if len(labels) > 1:
             raise ValueError(f"Too many labels defined for relation {self.name}")
@@ -509,8 +512,6 @@ class Relationship(ABC):
             query_str += f"MATCH ({from_node}) - [{rel_name}:{label} WHERE {attribute_str}] -> ({to_node})"
         else:
             query_str += f"MATCH ({from_node}) - [{rel_name}:{label}] -> ({to_node})"
-
-        query_str += "\n"
 
         return query_str
 
@@ -617,14 +618,19 @@ class RelationshipWithProperties:
         query_str = ""
         if not is_consequent:
             query_str += self.object.get_query(self.name, self.from_node.name, self.to_node.name)
-            query_str += "\n"
-            query_str += self.from_node.get_query(is_consequent)
-            query_str += "\n"
-            query_str += self.to_node.get_query(is_consequent)
-            query_str += "\n"
+            from_query = self.from_node.get_query(is_consequent, use_attributes=False)
+            if from_query != "":
+                query_str += "\n" if query_str != "" else ""
+                query_str += from_query
+            to_query = self.to_node.get_query(is_consequent, use_attributes=False)
+            if to_query != "":
+                query_str += "\n" if query_str != "" else ""
+                query_str += to_query
             if self.condition != "":
+                query_str += "\n" if query_str != "" else ""
                 query_str += f"MATCH () - [{self.name} WHERE {self.condition}] -> ()"
             if self.properties != "":
+                query_str += "\n" if query_str != "" else ""
                 query_str += f"MATCH () - [{self.name} {{{self.properties}}}] -> ()"
         else:
             if self.obj_type != "":
@@ -686,11 +692,11 @@ class Constructor(ABC):
     def get_query(self):
         query_str = ""
         for antecedent in self.antecedents:
+            query_str += "\n" if query_str != "" else ""
             query_str += antecedent.get_query()
-            query_str += "\n"
         for consequent in self.consequents:
+            query_str += "\n" if query_str != "" else ""
             query_str += consequent.get_query()
-            query_str += "\n"
         return query_str
 
 
